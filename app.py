@@ -77,8 +77,8 @@ def plot_wing_3d(
     N_span: int = 50,
 ) -> go.Figure:
     """
-    3D wing visualization — single ruled surface.
-    Dihedral, sweep, twist, and optional Cl color mapping.
+    3D wing visualization with visual thickness.
+    Upper + lower surfaces derived from a single mean-camber plane.
     """
     b = span / 2.0
     sweep_rad = np.radians(sweep_deg)
@@ -116,6 +116,11 @@ def plot_wing_3d(
             x_rel = X[j, i] - x_ref
             Z[j, i] += x_rel * np.tan(theta)
 
+    # --- Visual thickness: offset from final Z (AFTER twist) ---
+    half_t = 0.05 * np.vstack([chord, chord])  # (2, N) — subtle visual offset
+    Z_upper = Z + half_t
+    Z_lower = Z - half_t
+
     # --- Surface color (Cl distribution) — shape must be (2, N) ---
     surf_color = None
     show_colorbar = False
@@ -129,39 +134,58 @@ def plot_wing_3d(
 
     # --- Debug validation (prints to terminal) ---
     print(f"[Wing3D] X.shape={X.shape}  Y.shape={Y.shape}  Z.shape={Z.shape}")
+    print(f"[Wing3D] Z_upper.shape={Z_upper.shape}  Z_lower.shape={Z_lower.shape}")
     if surf_color is not None:
         print(f"[Wing3D] surf_color.shape={surf_color.shape}")
 
-    # --- Build figure: ONE surface only ---
+    # --- Lighting for depth ---
+    wing_lighting = dict(ambient=0.5, diffuse=0.8, specular=0.3)
+
+    # --- Build figure: upper + lower surface ---
     fig = go.Figure()
 
+    # Upper surface
     fig.add_trace(go.Surface(
-        x=X, y=Y, z=Z,
+        x=X, y=Y, z=Z_upper,
+        surfacecolor=surf_color,
+        colorscale='Viridis' if show_colorbar else 'Blues',
+        showscale=False,
+        opacity=0.6,
+        lighting=wing_lighting,
+        name='Upper Surface',
+    ))
+
+    # Lower surface
+    fig.add_trace(go.Surface(
+        x=X, y=Y, z=Z_lower,
         surfacecolor=surf_color,
         colorscale='Viridis' if show_colorbar else 'Blues',
         showscale=show_colorbar,
         colorbar=dict(title=dict(text='Cl'), len=0.6, x=1.02) if show_colorbar else None,
-        opacity=0.9,
-        name='Wing Surface',
+        opacity=0.6,
+        lighting=wing_lighting,
+        name='Lower Surface',
     ))
 
-    # Leading edge line
+    # Leading edge line (midpoint between upper and lower)
+    z_le_mid = (Z_upper[0, :] + Z_lower[0, :]) / 2.0
     fig.add_trace(go.Scatter3d(
-        x=X[0, :], y=Y[0, :], z=Z[0, :],
+        x=X[0, :], y=Y[0, :], z=z_le_mid,
         mode='lines',
         name='Leading Edge',
         line=dict(color='#1d4ed8', width=5),
     ))
 
-    # Trailing edge line
+    # Trailing edge line (midpoint between upper and lower)
+    z_te_mid = (Z_upper[1, :] + Z_lower[1, :]) / 2.0
     fig.add_trace(go.Scatter3d(
-        x=X[1, :], y=Y[1, :], z=Z[1, :],
+        x=X[1, :], y=Y[1, :], z=z_te_mid,
         mode='lines',
         name='Trailing Edge',
         line=dict(color='#059669', width=3),
     ))
 
-    # Debug: confirm exactly one surface trace
+    # Debug: confirm exactly two surface traces
     surface_count = sum(1 for t in fig.data if t.type == "surface")
     print(f"[Wing3D] Surface count: {surface_count}")
 
