@@ -90,8 +90,8 @@ def plot_wing_3d(
     # Chord distribution
     chord = chord_root + (chord_tip - chord_root) * (np.abs(y) / b)
 
-    # Sweep (using np.abs to ensure symmetric backwards sweep)
-    x_le = np.abs(y) * np.tan(sweep_rad)
+    # Sweep (signed y for correct left/right symmetry)
+    x_le = y * np.tan(sweep_rad)
     x_te = x_le + chord
 
     # Dihedral
@@ -111,8 +111,8 @@ def plot_wing_3d(
 
     # Apply twist (correct rotation about quarter chord)
     for i in range(N_span):
-        # using np.abs for symmetric negative washout on both wingtips
-        twist_local = twist_deg * (np.abs(y[i]) / b)
+        # signed y for continuous twist across span
+        twist_local = twist_deg * (y[i] / b)
         theta = np.deg2rad(twist_local)
 
         x_ref = x_le[i] + 0.25 * chord[i]
