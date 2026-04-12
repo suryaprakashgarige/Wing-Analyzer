@@ -48,6 +48,47 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
+def plot_wing_3d(span, chord_root, chord_tip, N=30):
+    y = np.linspace(-span/2, span/2, N)
+    chord = chord_root + (chord_tip - chord_root) * (np.abs(y)/(span/2))
+
+    x_le = np.zeros(N)
+    x_te = chord
+
+    fig = go.Figure()
+
+    # Leading edge
+    fig.add_trace(go.Scatter3d(x=x_le, y=y, z=np.zeros(N),
+                              mode='lines', name='Leading Edge',
+                              line=dict(color='#1d4ed8', width=4)))
+
+    # Trailing edge
+    fig.add_trace(go.Scatter3d(x=x_te, y=y, z=np.zeros(N),
+                              mode='lines', name='Trailing Edge',
+                              line=dict(color='#059669', width=4)))
+
+    # Surface (simple mesh)
+    X = np.array([x_le, x_te])
+    Y = np.array([y, y])
+    Z = np.zeros_like(X)
+
+    fig.add_trace(go.Surface(x=X, y=Y, z=Z, showscale=False, opacity=0.4, colorscale='Blues'))
+
+    fig.update_layout(
+        title="3D Wing Geometry",
+        scene=dict(
+            xaxis_title="Chord (m)",
+            yaxis_title="Span (m)",
+            zaxis_title="Z (m)",
+            aspectmode='data'
+        ),
+        margin=dict(l=0, r=0, b=0, t=40),
+        height=450
+    )
+
+    return fig
+
+
 # --- Model Loading (cached) ---
 @st.cache_resource
 def load_ml_model():
@@ -197,9 +238,16 @@ st.markdown(
     f"**Config:** {selected_preset.replace('_', ' ').title()}"
 )
 
+# 3D Wing Geometry (Always visible)
+st.plotly_chart(plot_wing_3d(span, root_c, tip_c), use_container_width=True)
+
 if st.button("RUN ANALYSIS", type="primary"):
     with st.spinner("Running physics-constrained analysis pipeline..."):
-        df, y_s, cl_dist, report, ood_count = compute_aerodynamics()
+        try:
+            df, y_s, cl_dist, report, ood_count = compute_aerodynamics()
+        except Exception as e:
+            st.error(f"Analysis failed with solver error: {str(e)}")
+            st.stop()
 
         if df is None:
             st.error("Analysis failed -- LLT solver could not converge at any AoA.")
@@ -220,15 +268,23 @@ if st.button("RUN ANALYSIS", type="primary"):
                     st.warning(f"{w.parameter}: {w.message}")
 
             # --- Top Metrics ---
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            
             best_ld = df['LD'].max()
             best_aoa = df.loc[df['LD'].idxmax(), 'aoa']
             cd0 = df['cd0'].iloc[0]
+            cdi_at_best_ld = df.loc[df['LD'].idxmax(), 'CDi']
+            
+            MAC = (2/3) * root_c * (1 + (tip_c/root_c) + (tip_c/root_c)**2) / (1 + (tip_c/root_c))
+            atm = get_atmosphere(alt)
+            Re_mac = atm['rho'] * speed * MAC / atm['mu']
 
-            m1.metric("Max Efficiency (L/D)", f"{best_ld:.1f}")
-            m2.metric("Optimal AoA", f"{best_aoa:.1f} deg")
-            m3.metric("Max Wing CL", f"{df['CL'].max():.3f}")
-            m4.metric("Parasite Drag (CD0)", f"{cd0:.5f}")
+            m1.metric("Max CL", f"{df['CL'].max():.3f}")
+            m2.metric("Min CD", f"{df['CD'].min():.4f}")
+            m3.metric("Max L/D", f"{best_ld:.1f}")
+            m4.metric("CD0 (Parasite)", f"{cd0:.4f}")
+            m5.metric("CDi (@ Max L/D)", f"{cdi_at_best_ld:.4f}")
+            m6.metric("Re (MAC)", f"{Re_mac/1e6:.2f}M")
 
             st.divider()
 
