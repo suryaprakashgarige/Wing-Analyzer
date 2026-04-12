@@ -230,3 +230,118 @@ class AirfoilML:
         cd_batch = np.clip(cd_batch, 0.0, _CD_RAW_MAX)
 
         return cl_batch, cd_batch
+
+
+# --- Standalone functions (no class dependency beyond predict interface) ---
+
+_A0_MIN = 4.5   # Min lift-curve slope (per radian) — heavily separated or very thick
+_A0_MAX = 7.0   # Max lift-curve slope (per radian) — thin airfoil limit ~2pi
+
+
+def compute_lift_slope(
+    ml_model: AirfoilML,
+    alpha_deg: float,
+    re: float,
+    thickness: float,
+    thickness_loc: float,
+    camber: float,
+    camber_loc: float,
+    delta_deg: float = 1.0,
+) -> float:
+    """
+    Compute section lift-curve slope (a0) from ML model using central difference.
+
+    Method:
+        a0 = dCl/dalpha = (Cl(alpha+delta) - Cl(alpha-delta)) / (2 * delta_rad)
+
+    The result is clamped to [4.5, 7.0] per radian to ensure physical consistency.
+    Thin-airfoil theory gives a0 = 2*pi ≈ 6.28.
+    Values outside [4.5, 7.0] indicate extrapolation or model failure.
+
+    Args:
+        ml_model: AirfoilML instance with predict() method.
+        alpha_deg: Angle of attack (degrees) at which to evaluate slope.
+        re: Reynolds number.
+        thickness: Max thickness ratio.
+        thickness_loc: Chordwise location of max thickness.
+        camber: Max camber ratio.
+        camber_loc: Chordwise location of max camber.
+        delta_deg: Perturbation size in degrees (default 1.0).
+
+    Returns:
+        Lift-curve slope a0 in per radian, clamped to [4.5, 7.0].
+    """
+    try:
+        cl_minus, _ = ml_model.predict(
+            re, alpha_deg - delta_deg,
+            thickness, thickness_loc, camber, camber_loc,
+        )
+        cl_plus, _ = ml_model.predict(
+            re, alpha_deg + delta_deg,
+            thickness, thickness_loc, camber, camber_loc,
+        )
+    except (ValueError, RuntimeError):
+        # Fallback to thin-airfoil theory on prediction failure
+        return 2.0 * np.pi
+
+    delta_rad = 2.0 * np.deg2rad(delta_deg)
+
+    if abs(delta_rad) < 1e-12:
+        return 2.0 * np.pi
+
+    dCl_dalpha = (cl_plus - cl_minus) / delta_rad
+
+    # Clamp to physically realistic range
+    a0 = np.clip(dCl_dalpha, _A0_MIN, _A0_MAX)
+
+    return float(a0)
+
+
+def compute_zero_lift_angle(
+    ml_model: AirfoilML,
+    re: float,
+    thickness: float,
+    thickness_loc: float,
+    camber: float,
+    camber_loc: float,
+) -> float:
+    """
+    Compute zero-lift angle (alpha_L0) by finding where Cl crosses zero.
+
+    Method:
+        Evaluate Cl at several AoA in the linear range, interpolate to find
+        the angle where Cl = 0.
+
+    Args:
+        ml_model: AirfoilML instance.
+        re: Reynolds number.
+        thickness, thickness_loc, camber, camber_loc: Airfoil geometry.
+
+    Returns:
+        Zero-lift angle in radians.
+    """
+    aoa_test = np.array([-4.0, -2.0, 0.0, 2.0, 4.0])
+    cl_test = np.empty(len(aoa_test))
+
+    for k, aoa in enumerate(aoa_test):
+        try:
+            cl_test[k], _ = ml_model.predict(
+                re, aoa, thickness, thickness_loc, camber, camber_loc,
+            )
+        except (ValueError, RuntimeError):
+            cl_test[k] = 2.0 * np.pi * np.radians(aoa)  # Fallback
+
+    # Interpolate: find alpha where Cl = 0
+    # np.interp requires xp to be increasing, and we want Cl(alpha) = 0
+    # Sort by Cl for interpolation
+    sorted_idx = np.argsort(cl_test)
+    cl_sorted = cl_test[sorted_idx]
+    aoa_sorted = np.radians(aoa_test[sorted_idx])
+
+    # If Cl range doesn't span zero, estimate from camber
+    if cl_sorted[0] > 0 or cl_sorted[-1] < 0:
+        return -2.0 * camber  # Thin-airfoil fallback
+
+    alpha_l0 = float(np.interp(0.0, cl_sorted, aoa_sorted))
+
+    return alpha_l0

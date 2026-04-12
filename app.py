@@ -1,13 +1,11 @@
 # app.py
 """
-Wing Analyzer Pro — Streamlit UI.
+Wing Analyzer Pro -- Streamlit UI.
 
-This is the presentation layer only. All computation is delegated to:
-  - core/airfoil_ml.py (ML predictions)
-  - core/physics.py (constraint enforcement)
-  - core/llt.py (lifting line theory)
-  - core/validation.py (result validation)
-  - utils/helpers.py (atmosphere, drag estimation)
+Pipeline (matches main.py exactly):
+  ML -> OOD check -> physics clamp -> lift slope extraction -> LLT -> drag model -> validation
+
+All computation delegated to core modules. This is presentation only.
 """
 
 import streamlit as st
@@ -17,20 +15,22 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 
-from core.airfoil_ml import AirfoilML
+from core.airfoil_ml import AirfoilML, compute_lift_slope, compute_zero_lift_angle
 from core.physics import enforce_physics
 from core.llt import solve_llt, LLTError
+from core.drag import compute_wing_drag
+from core.ood import check_prediction_ood
 from core.validation import (
     validate_wing_coefficients,
     validate_spanwise_distribution,
     Severity,
 )
 from core.config import PRESETS
-from utils.helpers import get_atmosphere, estimate_parasite_drag
+from utils.helpers import get_atmosphere
 
 
 # --- Page Config ---
-st.set_page_config(page_title="Wing Analyzer Pro", layout="wide", page_icon="✈️")
+st.set_page_config(page_title="Wing Analyzer Pro", layout="wide", page_icon="?")
 
 # --- Premium Styling ---
 st.markdown("""
@@ -48,7 +48,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
-# --- Model Loading (cached in session) ---
+# --- Model Loading (cached) ---
 @st.cache_resource
 def load_ml_model():
     models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
@@ -80,9 +80,11 @@ with st.sidebar:
     N_stations = st.slider("LLT Stations", 10, 100, 40, 5)
 
 
-# --- Computation ---
+# --- Computation (same pipeline as main.py) ---
 def compute_aerodynamics():
-    """Run the full analysis pipeline."""
+    """
+    Pipeline: ML -> OOD check -> lift slope extraction -> LLT -> drag model -> validation
+    """
     ml_model = load_ml_model()
 
     # 1. Atmosphere
@@ -97,46 +99,44 @@ def compute_aerodynamics():
     chords = root_c + (tip_c - root_c) * (1 - eta)
     re_stations = rho * speed * chords / mu
 
-    # 3. Section properties via ML + physics
+    # 3. OOD check + section properties via central-difference a0
     a0_dist = np.empty(N)
     al0_dist = np.empty(N)
-
-    aoa_test = np.arange(-5.0, 6.0, 1.0)
-    aoa_test_rad = np.radians(aoa_test)
+    ood_count = 0
 
     for i in range(N):
-        cl_samples = np.empty(len(aoa_test))
-        for k, aoa_val in enumerate(aoa_test):
-            cl, _ = ml_model.predict(
-                re_stations[i], aoa_val,
-                p['thickness'], p['thickness_loc'],
-                p['camber'], p['camber_loc'],
-            )
-            cl, _ = enforce_physics(
-                aoa_val, cl, 0.01,
-                p['thickness'], p['camber'],
-            )
-            cl_samples[k] = cl
+        # OOD check
+        ood = check_prediction_ood(
+            re_stations[i], 0.0,
+            p['thickness'], p['thickness_loc'],
+            p['camber'], p['camber_loc'],
+        )
 
-        coeffs = np.polyfit(aoa_test_rad, cl_samples, 1)
-        a0 = coeffs[0]
-        b = coeffs[1]
+        if not ood.is_in_distribution:
+            a0_dist[i] = 2.0 * np.pi
+            al0_dist[i] = -2.0 * p['camber']
+            ood_count += 1
+            continue
 
-        if abs(a0) > 0.1:
-            al0 = -b / a0
-        else:
-            al0 = -2.0 * p['camber']
-            a0 = 2.0 * np.pi
+        # Central-difference lift slope (clamped [4.5, 7.0])
+        a0_dist[i] = compute_lift_slope(
+            ml_model, 0.0, re_stations[i],
+            p['thickness'], p['thickness_loc'],
+            p['camber'], p['camber_loc'],
+        )
 
-        a0_dist[i] = a0
-        al0_dist[i] = al0
+        # Zero-lift angle via interpolation
+        al0_dist[i] = compute_zero_lift_angle(
+            ml_model, re_stations[i],
+            p['thickness'], p['thickness_loc'],
+            p['camber'], p['camber_loc'],
+        )
 
     # 4. AoA sweep with LLT
     aoa_sweep = np.arange(-4.0, 16.0, 1.0)
     results_list = []
     sample_cl_dist = None
     sample_y_dist = None
-    sample_alpha_i = None
 
     for aoa in aoa_sweep:
         try:
@@ -159,56 +159,65 @@ def compute_aerodynamics():
             if abs(aoa - 5.0) < 0.5:
                 sample_cl_dist = res.cl_dist
                 sample_y_dist = res.y_dist
-                sample_alpha_i = res.alpha_i_dist
 
     if not results_list:
-        return None, None, None, None
+        return None, None, None, None, 0
 
     df = pd.DataFrame(results_list)
 
-    # 5. Parasite drag
-    cd0 = estimate_parasite_drag(
-        rho, speed, root_c, tip_c, span, mu,
-        p['thickness'], p['thickness_loc'],
+    # 5. Drag model: CD = CD0 + CDi (NOT ML Cd)
+    AR = span ** 2 / (0.5 * (root_c + tip_c) * span)
+    drag_ref = compute_wing_drag(
+        CL=0.5, AR=AR, e=df['e'].max(),
+        rho=rho, V=speed, mu=mu,
+        root_chord=root_c, tip_chord=tip_c, span=span,
+        thickness=p['thickness'], thickness_loc=p['thickness_loc'],
     )
+    cd0 = drag_ref.CD0
 
     df['CD'] = df['CDi'] + cd0
     df['LD'] = df['CL'] / df['CD']
     df['cd0'] = cd0
 
     # 6. Validation
-    max_cl = df['CL'].max()
-    max_cd = df['CD'].max()
     report = validate_wing_coefficients(
-        max_cl, max_cd,
-        CDi=df['CDi'].max(),
-        e=df['e'].min(),
+        float(df['CL'].max()), float(df['CD'].max()),
+        CDi=float(df['CDi'].max()),
+        e=float(df['e'].min()),
+        AR=AR,
     )
 
-    return df, sample_y_dist, sample_cl_dist, report
+    return df, sample_y_dist, sample_cl_dist, report, ood_count
 
 
 # --- Main UI ---
 st.title("Wing Analyzer Pro")
 st.markdown(
-    f"**Analysis Mode:** Physics-Informed ML + Lifting Line Theory | "
-    f"**Configuration:** {selected_preset.replace('_', ' ').title()}"
+    f"**Pipeline:** ML -> OOD Check -> Physics Clamp -> LLT -> Drag Model (CD0+CDi) -> Validation | "
+    f"**Config:** {selected_preset.replace('_', ' ').title()}"
 )
 
 if st.button("RUN ANALYSIS", type="primary"):
-    with st.spinner("Calculating aerodynamic matrices..."):
-        df, y_s, cl_dist, report = compute_aerodynamics()
+    with st.spinner("Running physics-constrained analysis pipeline..."):
+        df, y_s, cl_dist, report, ood_count = compute_aerodynamics()
 
         if df is None:
-            st.error("Analysis failed — LLT solver could not converge at any AoA.")
+            st.error("Analysis failed -- LLT solver could not converge at any AoA.")
         else:
+            # --- OOD Status ---
+            if ood_count > 0:
+                st.warning(
+                    f"{ood_count}/{N_stations} spanwise stations were outside ML training "
+                    f"envelope and used thin-airfoil fallback."
+                )
+
             # --- Validation Status ---
             if report and not report.is_valid:
                 for err in report.errors:
-                    st.error(f"⚠ {err.parameter}: {err.message}")
+                    st.error(f"{err.parameter}: {err.message}")
             elif report and report.warnings:
                 for w in report.warnings:
-                    st.warning(f"⚠ {w.parameter}: {w.message}")
+                    st.warning(f"{w.parameter}: {w.message}")
 
             # --- Top Metrics ---
             m1, m2, m3, m4 = st.columns(4)
@@ -217,7 +226,7 @@ if st.button("RUN ANALYSIS", type="primary"):
             cd0 = df['cd0'].iloc[0]
 
             m1.metric("Max Efficiency (L/D)", f"{best_ld:.1f}")
-            m2.metric("Optimal AoA", f"{best_aoa:.1f}°")
+            m2.metric("Optimal AoA", f"{best_aoa:.1f} deg")
             m3.metric("Max Wing CL", f"{df['CL'].max():.3f}")
             m4.metric("Parasite Drag (CD0)", f"{cd0:.5f}")
 
@@ -229,19 +238,19 @@ if st.button("RUN ANALYSIS", type="primary"):
             with c1:
                 fig_lift = px.line(
                     df, x="aoa", y="CL",
-                    title="Wing Lift Curve (CL vs α)",
+                    title="Wing Lift Curve (CL vs AoA)",
                     template="plotly_white",
                 )
                 fig_lift.update_traces(line_color='#1d4ed8', line_width=3)
                 fig_lift.update_layout(
-                    xaxis_title="Angle of Attack (°)",
+                    xaxis_title="Angle of Attack (deg)",
                     yaxis_title="CL",
                 )
                 st.plotly_chart(fig_lift, use_container_width=True)
 
                 fig_polar = px.line(
                     df, x="CD", y="CL",
-                    title="Drag Polar (CL vs CD)",
+                    title="Drag Polar (CL vs CD = CD0 + CDi)",
                     template="plotly_white",
                 )
                 fig_polar.update_traces(line_color='#059669', line_width=3)
@@ -255,13 +264,12 @@ if st.button("RUN ANALYSIS", type="primary"):
                 )
                 fig_ld.update_traces(line_color='#7c3aed', line_width=3)
                 fig_ld.update_layout(
-                    xaxis_title="Angle of Attack (°)",
+                    xaxis_title="Angle of Attack (deg)",
                     yaxis_title="L/D",
                 )
                 st.plotly_chart(fig_ld, use_container_width=True)
 
                 if y_s is not None and cl_dist is not None:
-                    # Mirror for full span
                     y_full = np.concatenate([-y_s[::-1], y_s])
                     cl_full = np.concatenate([cl_dist[::-1], cl_dist])
 
@@ -275,7 +283,7 @@ if st.button("RUN ANALYSIS", type="primary"):
                         name='Local Cl',
                     ))
                     fig_dist.update_layout(
-                        title="Spanwise Lift Distribution (@ 5° AoA)",
+                        title="Spanwise Lift Distribution (@ 5 deg AoA)",
                         xaxis_title="Span Position (m)",
                         yaxis_title="Local Cl",
                         template="plotly_white",
@@ -283,7 +291,7 @@ if st.button("RUN ANALYSIS", type="primary"):
                     st.plotly_chart(fig_dist, use_container_width=True)
 
             # --- Detailed Data ---
-            with st.expander("📊 Detailed Results Table"):
+            with st.expander("Detailed Results Table"):
                 st.dataframe(
                     df[['aoa', 'CL', 'CDi', 'CD', 'LD', 'e', 'cond']].round(5),
                     use_container_width=True,
@@ -291,18 +299,17 @@ if st.button("RUN ANALYSIS", type="primary"):
 
             # --- Validation Report ---
             if report and report.issues:
-                with st.expander("🔍 Validation Report"):
+                with st.expander("Validation Report"):
                     for issue in report.issues:
-                        icon = {"INFO": "ℹ️", "WARNING": "⚠️", "ERROR": "❌"}
+                        icon = {"INFO": "i", "WARNING": "!", "ERROR": "X"}
                         sev = issue.severity.value
                         val = f" = {issue.value:.4f}" if issue.value else ""
                         st.markdown(
-                            f"{icon.get(sev, '•')} **[{sev}]** {issue.parameter}{val}: "
-                            f"{issue.message}"
+                            f"**[{sev}]** {issue.parameter}{val}: {issue.message}"
                         )
 
 else:
     st.info(
         "Adjust the parameters in the sidebar and click **RUN ANALYSIS** "
-        "to visualize the aerodynamic performance."
+        "to run the physics-constrained analysis pipeline."
     )
