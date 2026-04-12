@@ -48,42 +48,167 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
-def plot_wing_3d(span, chord_root, chord_tip, N=30):
-    y = np.linspace(-span/2, span/2, N)
-    chord = chord_root + (chord_tip - chord_root) * (np.abs(y)/(span/2))
+def _naca_thickness(x_frac: np.ndarray, t_c: float) -> np.ndarray:
+    """
+    NACA 4-digit symmetric thickness distribution.
+    x_frac: chordwise fraction [0, 1]
+    t_c: max thickness ratio (e.g. 0.12)
+    Returns half-thickness / chord.
+    """
+    a0, a1, a2, a3, a4 = 0.2969, -0.1260, -0.3516, 0.2843, -0.1015
+    yt = (t_c / 0.2) * (
+        a0 * np.sqrt(np.clip(x_frac, 0, 1))
+        + a1 * x_frac + a2 * x_frac**2
+        + a3 * x_frac**3 + a4 * x_frac**4
+    )
+    return yt
 
-    x_le = np.zeros(N)
-    x_te = chord
 
+def plot_wing_3d(
+    span: float,
+    chord_root: float,
+    chord_tip: float,
+    sweep_deg: float = 0.0,
+    dihedral_deg: float = 5.0,
+    thickness: float = 0.12,
+    cl_dist: np.ndarray = None,
+    y_dist: np.ndarray = None,
+    N_span: int = 40,
+    N_chord: int = 20,
+) -> go.Figure:
+    """
+    3D wing visualization with dihedral, sweep, NACA thickness profile,
+    and optional Cl color mapping.
+    """
+    b = span / 2.0
+    sweep_rad = np.radians(sweep_deg)
+    dihedral_rad = np.radians(dihedral_deg)
+
+    # --- Spanwise stations (full span, symmetric) ---
+    y_span = np.linspace(-b, b, N_span)
+    eta = np.abs(y_span) / b  # 0 at root, 1 at tip
+
+    # Chord at each span station (linear taper)
+    c_span = chord_root + (chord_tip - chord_root) * eta
+
+    # Leading-edge x offset (sweep)
+    x_le_offset = np.abs(y_span) * np.tan(sweep_rad)
+
+    # Vertical offset (dihedral)
+    z_dihedral = np.abs(y_span) * np.tan(dihedral_rad)
+
+    # --- Chordwise stations ---
+    x_frac = np.linspace(0, 1, N_chord)  # 0=LE, 1=TE
+
+    # NACA half-thickness at each chordwise point
+    yt_frac = _naca_thickness(x_frac, thickness)
+
+    # --- Build upper and lower surface meshes ---
+    # X[i_chord, j_span], Y[i_chord, j_span], Z[i_chord, j_span]
+    X_upper = np.zeros((N_chord, N_span))
+    Y_upper = np.zeros((N_chord, N_span))
+    Z_upper = np.zeros((N_chord, N_span))
+    X_lower = np.zeros((N_chord, N_span))
+    Y_lower = np.zeros((N_chord, N_span))
+    Z_lower = np.zeros((N_chord, N_span))
+
+    for j in range(N_span):
+        c = c_span[j]
+        x_local = x_frac * c + x_le_offset[j]  # chordwise physical position
+        half_t = yt_frac * c                     # half-thickness in meters
+
+        X_upper[:, j] = x_local
+        X_lower[:, j] = x_local
+        Y_upper[:, j] = y_span[j]
+        Y_lower[:, j] = y_span[j]
+        Z_upper[:, j] = z_dihedral[j] + half_t
+        Z_lower[:, j] = z_dihedral[j] - half_t
+
+    # --- Cl color mapping (interpolate onto the mesh if available) ---
+    surf_color_upper = None
+    surf_color_lower = None
+    show_colorbar = False
+
+    if cl_dist is not None and y_dist is not None and len(cl_dist) > 0:
+        # Mirror the half-span Cl distribution to full span
+        y_full = np.concatenate([-y_dist[::-1], y_dist])
+        cl_full = np.concatenate([cl_dist[::-1], cl_dist])
+
+        # Interpolate onto our spanwise grid
+        cl_interp = np.interp(y_span, y_full, cl_full)
+
+        # Broadcast to surface mesh: constant along chord, varies along span
+        surf_color_upper = np.tile(cl_interp, (N_chord, 1))
+        surf_color_lower = surf_color_upper.copy()
+        show_colorbar = True
+
+    # --- Build figure ---
     fig = go.Figure()
 
-    # Leading edge
-    fig.add_trace(go.Scatter3d(x=x_le, y=y, z=np.zeros(N),
-                              mode='lines', name='Leading Edge',
-                              line=dict(color='#1d4ed8', width=4)))
+    # Upper surface
+    fig.add_trace(go.Surface(
+        x=X_upper, y=Y_upper, z=Z_upper,
+        surfacecolor=surf_color_upper,
+        colorscale='Viridis' if show_colorbar else 'Blues',
+        showscale=show_colorbar,
+        colorbar=dict(title=dict(text='Cl'), len=0.6, x=1.02) if show_colorbar else None,
+        opacity=0.85,
+        name='Upper Surface',
+        lighting=dict(ambient=0.5, diffuse=0.7, specular=0.3, roughness=0.4),
+        lightposition=dict(x=0, y=0, z=1000),
+    ))
 
-    # Trailing edge
-    fig.add_trace(go.Scatter3d(x=x_te, y=y, z=np.zeros(N),
-                              mode='lines', name='Trailing Edge',
-                              line=dict(color='#059669', width=4)))
+    # Lower surface
+    fig.add_trace(go.Surface(
+        x=X_lower, y=Y_lower, z=Z_lower,
+        surfacecolor=surf_color_lower,
+        colorscale='Viridis' if show_colorbar else 'Blues',
+        showscale=False,
+        opacity=0.75,
+        name='Lower Surface',
+        lighting=dict(ambient=0.5, diffuse=0.7, specular=0.3, roughness=0.4),
+        lightposition=dict(x=0, y=0, z=-1000),
+    ))
 
-    # Surface (simple mesh)
-    X = np.array([x_le, x_te])
-    Y = np.array([y, y])
-    Z = np.zeros_like(X)
+    # Leading edge highlight
+    le_x = X_upper[0, :]
+    le_y = Y_upper[0, :]
+    le_z = (Z_upper[0, :] + Z_lower[0, :]) / 2.0
+    fig.add_trace(go.Scatter3d(
+        x=le_x, y=le_y, z=le_z,
+        mode='lines', name='Leading Edge',
+        line=dict(color='#1d4ed8', width=5),
+    ))
 
-    fig.add_trace(go.Surface(x=X, y=Y, z=Z, showscale=False, opacity=0.4, colorscale='Blues'))
+    # Trailing edge highlight
+    te_x = X_upper[-1, :]
+    te_y = Y_upper[-1, :]
+    te_z = (Z_upper[-1, :] + Z_lower[-1, :]) / 2.0
+    fig.add_trace(go.Scatter3d(
+        x=te_x, y=te_y, z=te_z,
+        mode='lines', name='Trailing Edge',
+        line=dict(color='#059669', width=3),
+    ))
 
+    # --- Layout ---
+    title = "3D Wing — Cl Distribution" if show_colorbar else "3D Wing Geometry"
     fig.update_layout(
-        title="3D Wing Geometry",
+        title=dict(text=title, font=dict(size=16)),
         scene=dict(
             xaxis_title="Chord (m)",
             yaxis_title="Span (m)",
-            zaxis_title="Z (m)",
-            aspectmode='data'
+            zaxis_title="Vertical (m)",
+            aspectmode='data',
+            camera=dict(
+                eye=dict(x=1.2, y=-1.8, z=0.9),
+                up=dict(x=0, y=0, z=1),
+            ),
+            xaxis=dict(backgroundcolor='#f8fafc', gridcolor='#e2e8f0'),
+            yaxis=dict(backgroundcolor='#f8fafc', gridcolor='#e2e8f0'),
+            zaxis=dict(backgroundcolor='#f8fafc', gridcolor='#e2e8f0'),
         ),
         margin=dict(l=0, r=0, b=0, t=40),
-        height=450
+        height=500,
     )
 
     return fig
@@ -238,8 +363,16 @@ st.markdown(
     f"**Config:** {selected_preset.replace('_', ' ').title()}"
 )
 
-# 3D Wing Geometry (Always visible)
-st.plotly_chart(plot_wing_3d(span, root_c, tip_c), use_container_width=True)
+# 3D Wing Geometry (Always visible — no Cl data before analysis)
+st.plotly_chart(
+    plot_wing_3d(
+        span, root_c, tip_c,
+        sweep_deg=sweep,
+        dihedral_deg=float(p.get('dihedral_deg', 5.0)),
+        thickness=float(p.get('thickness', 0.12)),
+    ),
+    use_container_width=True,
+)
 
 if st.button("RUN ANALYSIS", type="primary"):
     with st.spinner("Running physics-constrained analysis pipeline..."):
@@ -345,6 +478,17 @@ if st.button("RUN ANALYSIS", type="primary"):
                         template="plotly_white",
                     )
                     st.plotly_chart(fig_dist, use_container_width=True)
+
+                    # --- 3D Wing with Cl color overlay ---
+                    fig_wing_cl = plot_wing_3d(
+                        span, root_c, tip_c,
+                        sweep_deg=sweep,
+                        dihedral_deg=float(p.get('dihedral_deg', 5.0)),
+                        thickness=float(p.get('thickness', 0.12)),
+                        cl_dist=cl_dist,
+                        y_dist=y_s,
+                    )
+                    st.plotly_chart(fig_wing_cl, use_container_width=True)
 
             # --- Detailed Data ---
             with st.expander("Detailed Results Table"):
