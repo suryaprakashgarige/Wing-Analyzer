@@ -77,104 +77,99 @@ def plot_wing_3d(
     N_span: int = 50,
 ) -> go.Figure:
     """
-    3D wing visualization with dihedral, sweep, twist, thickness,
-    and optional Cl color mapping.
+    3D wing visualization — single ruled surface.
+    Dihedral, sweep, twist, and optional Cl color mapping.
     """
     b = span / 2.0
     sweep_rad = np.radians(sweep_deg)
     dihedral_rad = np.radians(dihedral_deg)
 
-    # Spanwise positions
+    # --- Spanwise stations ---
     y = np.linspace(-b, b, N_span)
-    
-    # Chord distribution
+
+    # Chord: tapers symmetrically from root to tips (abs is correct here)
     chord = chord_root + (chord_tip - chord_root) * (np.abs(y) / b)
 
-    # Sweep (signed y for correct left/right symmetry)
+    # Sweep: signed y → left wing sweeps opposite to right (no np.abs)
     x_le = y * np.tan(sweep_rad)
+
+    # Trailing edge derived from leading edge (never computed independently)
     x_te = x_le + chord
 
-    # Dihedral
+    # Dihedral: both wings rise away from center (abs is correct here)
     z_base = np.tan(dihedral_rad) * np.abs(y)
 
-    # Thickness offset
-    half_t = 0.5 * thickness * chord
+    # --- Build single ruled-surface mesh — shape (2, N) ---
+    X = np.vstack([x_le, x_te])      # (2, N)
+    Y = np.vstack([y, y])            # (2, N)
+    Z = np.vstack([z_base, z_base])  # (2, N)
 
-    # Build grid (STRICT)
-    X_upper = np.vstack([x_le, x_te])   # (2, N)
-    Y_upper = np.vstack([y, y])         # (2, N)
-    Z_upper = np.vstack([z_base + half_t, z_base + half_t])
-
-    X_lower = np.vstack([x_le, x_te])   # (2, N)
-    Y_lower = np.vstack([y, y])         # (2, N)
-    Z_lower = np.vstack([z_base - half_t, z_base - half_t])
-
-    # Apply twist (correct rotation about quarter chord)
+    # --- Apply twist as rotation about quarter-chord ---
     for i in range(N_span):
-        # signed y for continuous twist across span
+        # Signed y → continuous twist across full span (no np.abs)
         twist_local = twist_deg * (y[i] / b)
         theta = np.deg2rad(twist_local)
 
         x_ref = x_le[i] + 0.25 * chord[i]
 
-        for surface_X, surface_Z in [(X_upper, Z_upper), (X_lower, Z_lower)]:
-            for j in range(2):
-                x_rel = surface_X[j, i] - x_ref
-                surface_Z[j, i] += x_rel * np.tan(theta)
+        for j in range(2):
+            x_rel = X[j, i] - x_ref
+            Z[j, i] += x_rel * np.tan(theta)
 
-    # Surface color (lift)
+    # --- Surface color (Cl distribution) — shape must be (2, N) ---
     surf_color = None
     show_colorbar = False
-    
+
     if cl_dist is not None and y_dist is not None and len(cl_dist) > 0:
         y_full = np.concatenate([-y_dist[::-1], y_dist])
         cl_full = np.concatenate([cl_dist[::-1], cl_dist])
         cl_interp = np.interp(y, y_full, cl_full)
-        surf_color = np.vstack([cl_interp, cl_interp])
+        surf_color = np.vstack([cl_interp, cl_interp])  # (2, N)
         show_colorbar = True
 
-    # Plot
+    # --- Debug validation (prints to terminal) ---
+    print(f"[Wing3D] X.shape={X.shape}  Y.shape={Y.shape}  Z.shape={Z.shape}")
+    if surf_color is not None:
+        print(f"[Wing3D] surf_color.shape={surf_color.shape}")
+
+    # --- Build figure: ONE surface only ---
     fig = go.Figure()
 
     fig.add_trace(go.Surface(
-        x=X_upper, y=Y_upper, z=Z_upper,
+        x=X, y=Y, z=Z,
         surfacecolor=surf_color,
         colorscale='Viridis' if show_colorbar else 'Blues',
         showscale=show_colorbar,
         colorbar=dict(title=dict(text='Cl'), len=0.6, x=1.02) if show_colorbar else None,
-        opacity=0.85,
-        name='Upper Surface'
+        opacity=0.9,
+        name='Wing Surface',
     ))
 
-    fig.add_trace(go.Surface(
-        x=X_lower, y=Y_lower, z=Z_lower,
-        surfacecolor=surf_color,
-        colorscale='Viridis' if show_colorbar else 'Blues',
-        showscale=False,
-        opacity=0.70,
-        name='Lower Surface'
-    ))
-
-    # Leading edge
-    z_le_line = (Z_upper[0, :] + Z_lower[0, :]) / 2.0
+    # Leading edge line
     fig.add_trace(go.Scatter3d(
-        x=x_le, y=y, z=z_le_line,
+        x=X[0, :], y=Y[0, :], z=Z[0, :],
         mode='lines',
         name='Leading Edge',
-        line=dict(color='#1d4ed8', width=5)
+        line=dict(color='#1d4ed8', width=5),
     ))
 
-    # Trailing edge
-    z_te_line = (Z_upper[1, :] + Z_lower[1, :]) / 2.0
+    # Trailing edge line
     fig.add_trace(go.Scatter3d(
-        x=x_te, y=y, z=z_te_line,
+        x=X[1, :], y=Y[1, :], z=Z[1, :],
         mode='lines',
         name='Trailing Edge',
-        line=dict(color='#059669', width=3)
+        line=dict(color='#059669', width=3),
     ))
 
+    # Debug: confirm exactly one surface trace
+    surface_count = sum(1 for t in fig.data if t.type == "surface")
+    print(f"[Wing3D] Surface count: {surface_count}")
+
     fig.update_layout(
-        title=dict(text="3D Wing — Cl Distribution" if show_colorbar else "3D Wing Geometry", font=dict(size=16)),
+        title=dict(
+            text="3D Wing — Cl Distribution" if show_colorbar else "3D Wing Geometry",
+            font=dict(size=16),
+        ),
         scene=dict(
             xaxis_title="Chord (m)",
             yaxis_title="Span (m)",
@@ -183,10 +178,10 @@ def plot_wing_3d(
             camera=dict(
                 eye=dict(x=1.2, y=-1.8, z=0.9),
                 up=dict(x=0, y=0, z=1),
-            )
+            ),
         ),
         margin=dict(l=0, r=0, b=0, t=40),
-        height=500
+        height=500,
     )
 
     return fig
