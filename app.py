@@ -48,20 +48,49 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
-def _naca_thickness(x_frac: np.ndarray, t_c: float) -> np.ndarray:
+def _naca_2412_airfoil(n_pts: int = 50):
     """
-    NACA 4-digit symmetric thickness distribution.
-    x_frac: chordwise fraction [0, 1]
-    t_c: max thickness ratio (e.g. 0.12)
-    Returns half-thickness / chord.
+    Generate NACA 2412 airfoil upper and lower surface coordinates.
+    Returns x_upper, z_upper, x_lower, z_lower — all in [0, 1] chord fraction.
+    
+    NACA 2412: 2% camber at 40% chord, 12% thickness.
     """
+    m, p_cam, t_c = 0.02, 0.4, 0.12
+
+    # Cosine-clustered chordwise points for smooth LE resolution
+    beta = np.linspace(0, np.pi, n_pts)
+    x = 0.5 * (1.0 - np.cos(beta))  # [0, 1]
+
+    # Thickness distribution (NACA 4-digit)
     a0, a1, a2, a3, a4 = 0.2969, -0.1260, -0.3516, 0.2843, -0.1015
     yt = (t_c / 0.2) * (
-        a0 * np.sqrt(np.clip(x_frac, 0, 1))
-        + a1 * x_frac + a2 * x_frac**2
-        + a3 * x_frac**3 + a4 * x_frac**4
+        a0 * np.sqrt(np.clip(x, 1e-12, 1.0))
+        + a1 * x + a2 * x**2
+        + a3 * x**3 + a4 * x**4
     )
-    return yt
+
+    # Mean camber line
+    yc = np.where(
+        x <= p_cam,
+        (m / p_cam**2) * (2.0 * p_cam * x - x**2),
+        (m / (1.0 - p_cam)**2) * ((1.0 - 2.0 * p_cam) + 2.0 * p_cam * x - x**2),
+    )
+
+    # Camber line slope
+    dyc = np.where(
+        x <= p_cam,
+        (2.0 * m / p_cam**2) * (p_cam - x),
+        (2.0 * m / (1.0 - p_cam)**2) * (p_cam - x),
+    )
+    theta_cam = np.arctan(dyc)
+
+    # Upper and lower surfaces
+    x_upper = x - yt * np.sin(theta_cam)
+    z_upper = yc + yt * np.cos(theta_cam)
+    x_lower = x + yt * np.sin(theta_cam)
+    z_lower = yc - yt * np.cos(theta_cam)
+
+    return x_upper, z_upper, x_lower, z_lower
 
 
 def plot_wing_3d(
@@ -74,118 +103,138 @@ def plot_wing_3d(
     thickness: float = 0.12,
     cl_dist: np.ndarray = None,
     y_dist: np.ndarray = None,
-    N_span: int = 50,
+    N_span: int = 30,
 ) -> go.Figure:
     """
-    3D wing visualization with visual thickness.
-    Upper + lower surfaces derived from a single mean-camber plane.
+    Production 3D wing with true NACA 2412 airfoil cross-sections.
+    Grids: (N_span, N_chord) — real airfoil shape at every station.
     """
+    N_chord = 50
     b = span / 2.0
     sweep_rad = np.radians(sweep_deg)
     dihedral_rad = np.radians(dihedral_deg)
 
+    # --- Airfoil template (unit chord) ---
+    xf_u, zf_u, xf_l, zf_l = _naca_2412_airfoil(N_chord)
+
     # --- Spanwise stations ---
     y = np.linspace(-b, b, N_span)
 
-    # Chord: tapers symmetrically from root to tips (abs is correct here)
-    chord = chord_root + (chord_tip - chord_root) * (np.abs(y) / b)
+    # --- Allocate surface grids: shape (N_span, N_chord) ---
+    X_upper = np.zeros((N_span, N_chord))
+    Y_upper = np.zeros((N_span, N_chord))
+    Z_upper = np.zeros((N_span, N_chord))
 
-    # Sweep: signed y → left wing sweeps opposite to right (no np.abs)
-    x_le = y * np.tan(sweep_rad)
+    X_lower = np.zeros((N_span, N_chord))
+    Y_lower = np.zeros((N_span, N_chord))
+    Z_lower = np.zeros((N_span, N_chord))
 
-    # Trailing edge derived from leading edge (never computed independently)
-    x_te = x_le + chord
-
-    # Dihedral: both wings rise away from center (abs is correct here)
-    z_base = np.tan(dihedral_rad) * np.abs(y)
-
-    # --- Build single ruled-surface mesh — shape (2, N) ---
-    X = np.vstack([x_le, x_te])      # (2, N)
-    Y = np.vstack([y, y])            # (2, N)
-    Z = np.vstack([z_base, z_base])  # (2, N)
-
-    # --- Apply twist as rotation about quarter-chord ---
     for i in range(N_span):
-        # Signed y → continuous twist across full span (no np.abs)
-        twist_local = twist_deg * (y[i] / b)
+        yi = y[i]
+
+        # Chord taper (abs is correct — both tips taper symmetrically)
+        chord_i = chord_root + (chord_tip - chord_root) * (np.abs(yi) / b)
+
+        # Leading-edge position from sweep (signed y — no abs)
+        x_le_i = yi * np.tan(sweep_rad)
+
+        # Dihedral baseline (abs — both wings rise)
+        z_base_i = np.tan(dihedral_rad) * np.abs(yi)
+
+        # Scale airfoil to local chord and position
+        x_u = x_le_i + xf_u * chord_i
+        z_u = z_base_i + zf_u * chord_i
+        x_l = x_le_i + xf_l * chord_i
+        z_l = z_base_i + zf_l * chord_i
+
+        # --- Twist: rotation about quarter-chord (signed y — no abs) ---
+        twist_local = twist_deg * (yi / b)
         theta = np.deg2rad(twist_local)
 
-        x_ref = x_le[i] + 0.25 * chord[i]
+        x_ref = x_le_i + 0.25 * chord_i
 
-        for j in range(2):
-            x_rel = X[j, i] - x_ref
-            Z[j, i] += x_rel * np.tan(theta)
+        # Rotate upper surface
+        x_rel_u = x_u - x_ref
+        z_u = z_u + x_rel_u * np.tan(theta)
 
-    # --- Visual thickness: offset from final Z (AFTER twist) ---
-    half_t = 0.05 * np.vstack([chord, chord])  # (2, N) — subtle visual offset
-    Z_upper = Z + half_t
-    Z_lower = Z - half_t
+        # Rotate lower surface
+        x_rel_l = x_l - x_ref
+        z_l = z_l + x_rel_l * np.tan(theta)
 
-    # --- Surface color (Cl distribution) — shape must be (2, N) ---
-    surf_color = None
+        # Fill grids
+        X_upper[i, :] = x_u
+        Y_upper[i, :] = yi
+        Z_upper[i, :] = z_u
+
+        X_lower[i, :] = x_l
+        Y_lower[i, :] = yi
+        Z_lower[i, :] = z_l
+
+    # --- Surface color (Cl mapped across span) ---
+    surf_color_upper = None
+    surf_color_lower = None
     show_colorbar = False
 
     if cl_dist is not None and y_dist is not None and len(cl_dist) > 0:
         y_full = np.concatenate([-y_dist[::-1], y_dist])
         cl_full = np.concatenate([cl_dist[::-1], cl_dist])
-        cl_interp = np.interp(y, y_full, cl_full)
-        surf_color = np.vstack([cl_interp, cl_interp])  # (2, N)
+        cl_interp = np.interp(y, y_full, cl_full)  # (N_span,)
+
+        # Broadcast to (N_span, N_chord) — constant across chord
+        surf_color_upper = np.tile(cl_interp[:, np.newaxis], (1, N_chord))
+        surf_color_lower = np.tile(cl_interp[:, np.newaxis], (1, N_chord))
         show_colorbar = True
 
-    # --- Debug validation (prints to terminal) ---
-    print(f"[Wing3D] X.shape={X.shape}  Y.shape={Y.shape}  Z.shape={Z.shape}")
-    print(f"[Wing3D] Z_upper.shape={Z_upper.shape}  Z_lower.shape={Z_lower.shape}")
-    if surf_color is not None:
-        print(f"[Wing3D] surf_color.shape={surf_color.shape}")
+    # --- Debug validation ---
+    print(f"[Wing3D] Grid shape: ({N_span}, {N_chord})")
+    print(f"[Wing3D] X_upper={X_upper.shape}  Z_upper={Z_upper.shape}")
 
-    # --- Lighting for depth ---
+    # --- Lighting ---
     wing_lighting = dict(ambient=0.5, diffuse=0.8, specular=0.3)
 
-    # --- Build figure: upper + lower surface ---
+    # --- Build figure ---
     fig = go.Figure()
 
     # Upper surface
     fig.add_trace(go.Surface(
-        x=X, y=Y, z=Z_upper,
-        surfacecolor=surf_color,
+        x=X_upper, y=Y_upper, z=Z_upper,
+        surfacecolor=surf_color_upper,
         colorscale='Viridis' if show_colorbar else 'Blues',
         showscale=False,
-        opacity=0.6,
+        opacity=0.85,
         lighting=wing_lighting,
         name='Upper Surface',
     ))
 
     # Lower surface
     fig.add_trace(go.Surface(
-        x=X, y=Y, z=Z_lower,
-        surfacecolor=surf_color,
+        x=X_lower, y=Y_lower, z=Z_lower,
+        surfacecolor=surf_color_lower,
         colorscale='Viridis' if show_colorbar else 'Blues',
         showscale=show_colorbar,
         colorbar=dict(title=dict(text='Cl'), len=0.6, x=1.02) if show_colorbar else None,
-        opacity=0.6,
+        opacity=0.85,
         lighting=wing_lighting,
         name='Lower Surface',
     ))
 
-    # Leading edge line (midpoint between upper and lower)
-    z_le_mid = (Z_upper[0, :] + Z_lower[0, :]) / 2.0
+    # Leading edge line (upper LE column)
     fig.add_trace(go.Scatter3d(
-        x=X[0, :], y=Y[0, :], z=z_le_mid,
+        x=X_upper[:, 0], y=Y_upper[:, 0], z=Z_upper[:, 0],
         mode='lines',
         name='Leading Edge',
         line=dict(color='#1d4ed8', width=5),
     ))
 
-    # Trailing edge line (midpoint between upper and lower)
-    z_te_mid = (Z_upper[1, :] + Z_lower[1, :]) / 2.0
+    # Trailing edge line (upper TE column)
     fig.add_trace(go.Scatter3d(
-        x=X[1, :], y=Y[1, :], z=z_te_mid,
+        x=X_upper[:, -1], y=Y_upper[:, -1], z=Z_upper[:, -1],
         mode='lines',
         name='Trailing Edge',
         line=dict(color='#059669', width=3),
     ))
 
-    # Debug: confirm exactly two surface traces
+    # Debug count
     surface_count = sum(1 for t in fig.data if t.type == "surface")
     print(f"[Wing3D] Surface count: {surface_count}")
 
@@ -205,7 +254,7 @@ def plot_wing_3d(
             ),
         ),
         margin=dict(l=0, r=0, b=0, t=40),
-        height=500,
+        height=550,
     )
 
     return fig
