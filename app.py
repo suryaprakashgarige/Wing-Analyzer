@@ -30,7 +30,10 @@ from utils.helpers import get_atmosphere
 
 
 # --- Page Config ---
-st.set_page_config(page_title="Wing Analyzer Pro", layout="wide", page_icon="?")
+st.set_page_config(
+    page_title="Wing Analysis using Physics-Informed ML",
+    layout="wide"
+)
 
 # --- Premium Styling ---
 st.markdown("""
@@ -176,7 +179,9 @@ def load_ml_model():
 
 # --- Sidebar ---
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/aircraft-wing.png", width=80)
+    from PIL import Image
+    logo = Image.open("logo.png")
+    st.sidebar.image(logo, width=120)
     st.title("Wing Config")
 
     selected_preset = st.selectbox("Load Preset", list(PRESETS.keys()), index=1)
@@ -310,7 +315,13 @@ def compute_aerodynamics():
 
 
 # --- Main UI ---
-st.title("Wing Analyzer Pro")
+col1, col2 = st.columns([1, 5])
+
+with col1:
+    st.image("logo.png", width=80)
+
+with col2:
+    st.title("Wing Analysis using Physics-Informed Machine Learning Model")
 st.markdown(
     f"**Pipeline:** ML -> OOD Check -> Physics Clamp -> LLT -> Drag Model (CD0+CDi) -> Validation | "
     f"**Config:** {selected_preset.replace('_', ' ').title()}"
