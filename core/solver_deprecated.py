@@ -1,3 +1,10 @@
+# =============================================================================
+# DEPRECATED — DO NOT USE
+# This file is an orphaned pipeline from an earlier refactor.
+# It contains an incompatible ML interface, incorrect lift-slope extraction,
+# and inconsistent drag blending. The active pipeline is in main.py and app.py.
+# =============================================================================
+
 import numpy as np
 
 from core.airfoil_ml import AirfoilML

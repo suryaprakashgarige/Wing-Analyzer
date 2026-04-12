@@ -133,7 +133,7 @@ def solve_llt(
     rhs = np.zeros(N)
 
     for i in range(N):
-        mu_i = c_s[i] * a0_dist[i] / (4.0 * span)
+        mu_i = c_s[i] * a0_dist[i] / (2.0 * span)
         sin_theta_i = np.sin(theta[i])
 
         # Guard against sin(θ) → 0 (shouldn't happen with proper spacing)
@@ -210,7 +210,7 @@ def solve_llt(
         gamma_dist += An[j] * np.sin(n * theta)
 
     # Local lift coefficient: Cl(y) = 2Γ/(Vc) = 4b/c * Σ An sin(nθ)
-    cl_dist = (4.0 * span / c_s) * gamma_dist
+    cl_dist = (2.0 * span / c_s) * gamma_dist
 
     # Induced angle of attack: α_i = Σ (n An sin(nθ)) / sin(θ)
     alpha_i_dist = np.zeros(N)

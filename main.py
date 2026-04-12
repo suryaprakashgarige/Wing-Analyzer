@@ -23,7 +23,7 @@ import sys
 from core.airfoil_ml import AirfoilML, compute_lift_slope, compute_zero_lift_angle
 from core.physics import enforce_physics
 from core.llt import solve_llt, LLTError
-from core.drag import compute_wing_drag, compute_form_factor
+from core.drag import compute_wing_drag
 from core.ood import check_prediction_ood
 from core.validation import (
     validate_wing_coefficients,
@@ -174,10 +174,11 @@ def run_analysis(wing_type: str = 'general_aviation', N: int = 40) -> dict:
         print(f"      [!] {ood_stations}/{N} stations used thin-airfoil fallback (OOD)")
 
     # --- 6. AoA Sweep using LLT ---
-    aoa_sweep = np.arange(-4.0, 16.0, 1.0)
+    aoa_sweep = np.arange(-4.0, 13.0, 1.0)
     cl_results = []
     cdi_results = []
     e_results = []
+    aoa_valid_list = []
     sample_cl_dist = None
     sample_y_dist = None
     sample_alpha_i = None
@@ -201,6 +202,7 @@ def run_analysis(wing_type: str = 'general_aviation', N: int = 40) -> dict:
             failed_count += 1
             continue
 
+        aoa_valid_list.append(aoa)
         cl_results.append(res.CL)
         cdi_results.append(res.CDi)
         e_results.append(res.e)
@@ -214,8 +216,8 @@ def run_analysis(wing_type: str = 'general_aviation', N: int = 40) -> dict:
     if failed_count > 0:
         print(f"      [!] {failed_count}/{len(aoa_sweep)} AoA points failed")
 
-    # Trim to match successful results
-    aoa_valid = aoa_sweep[:len(cl_results)]
+    # Use explicitly tracked successful AoA values
+    aoa_valid = np.array(aoa_valid_list)
     cl_array = np.array(cl_results)
     cdi_array = np.array(cdi_results)
 
@@ -225,7 +227,6 @@ def run_analysis(wing_type: str = 'general_aviation', N: int = 40) -> dict:
     )
 
     # Compute CD0 once (it doesn't change with AoA)
-    from core.drag import compute_wing_drag
     drag_ref = compute_wing_drag(
         CL=0.5, AR=AR, e=max(e_results) if e_results else 0.9,
         rho=rho, V=V, mu=mu,

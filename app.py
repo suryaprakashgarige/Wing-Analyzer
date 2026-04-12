@@ -174,7 +174,7 @@ def compute_aerodynamics():
         )
 
     # 4. AoA sweep with LLT
-    aoa_sweep = np.arange(-4.0, 16.0, 1.0)
+    aoa_sweep = np.arange(-4.0, 13.0, 1.0)
     results_list = []
     sample_cl_dist = None
     sample_y_dist = None
