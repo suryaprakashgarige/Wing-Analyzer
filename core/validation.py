@@ -170,11 +170,21 @@ def validate_wing_coefficients(
 
     # --- Oswald factor checks ---
     if e is not None:
-        if not (OSWALD_RANGE[0] <= e <= OSWALD_RANGE[1]):
-            if e < OSWALD_RANGE[0]:
+        # Recompute e safely if CDi is available (validation safeguard)
+        if CDi is not None and AR is not None and CDi > 1e-12:
+            if abs(CL) < 0.1:
+                e = np.nan
+            else:
+                e = CL**2 / (np.pi * AR * CDi)
+
+        # Apply updated warning logic
+        if not np.isnan(e):
+            if abs(CL) < 0.1:
+                report.add(Severity.INFO, "Oswald e",
+                           "Oswald efficiency undefined near zero lift", e)
+            elif e < 0.6:
                 report.add(Severity.WARNING, "Oswald e",
-                           "Low span efficiency — check wing geometry", e,
-                           f"[{OSWALD_RANGE[0]}, {OSWALD_RANGE[1]}]")
+                           "Low span efficiency — check wing geometry", e)
             elif e > 1.0:
                 report.add(Severity.ERROR, "Oswald e",
                            "Exceeds 1.0 — non-physical", e)
