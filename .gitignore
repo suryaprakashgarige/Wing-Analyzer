@@ -29,6 +29,7 @@ data/
 *.jpg
 *.jpeg
 *.pkl
+!models/*.pkl
 !.gitkeep
 
 # IDEs
